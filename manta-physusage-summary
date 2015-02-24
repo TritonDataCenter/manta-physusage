@@ -1,0 +1,447 @@
+#!/usr/bin/env node
+/* vim: set ft=javascript: */
+/*
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ */
+
+/*
+ * Copyright (c) 2015, Joyent, Inc.
+ */
+
+/*
+ * manta-physusage-summary: on stdin, reads lines emitted by manta-cn-physusage,
+ * which are of the form:
+ *
+ *     DATACENTER_NAME HOSTNAME CATEGORY USER COUNT
+ *
+ * and produces on stdout a sorted summary by user and by CN.  You can cat all
+ * the output files from running "manta-cn-physusage" on several nodes together
+ * and feed that to this program.
+ *
+ * This tool must be run in a context with the "sdc-ldap" tool available in
+ * order to map uuids back to user logins.
+ *
+ * This tool deliberately avoids any external Node dependencies so that it's
+ * easy to drop it into a new context (e.g., a headnode) and run it.
+ */
+
+var mod_assert = require('assert');
+var mod_child = require('child_process');
+var mod_path = require('path');
+var mod_stream = require('stream');
+var mod_util = require('util');
+
+/*
+ * CONFIGURATION
+ */
+var resolve_users = true;    /* resolve user uuids to logins using sdc-ldap */
+var max_users_to_print = 30; /* how many top users to print */
+
+var arg0 = mod_path.basename(process.argv[1]);
+var specialUuids = {
+    'nginx_temp': true,
+    'rebalance_tmp': true,
+    'tombstone': true
+};
+
+function main()
+{
+	var reader;
+
+	if (process.argv.length < 2 || process.argv.length > 3)
+		usage();
+
+	if (process.argv.length == 3) {
+		if (process.argv[2] != '-n')
+			usage();
+		resolve_users = false;
+	}
+
+	reader = new DataReader();
+	process.stdin.pipe(reader);
+	reader.on('ready', function () { reader.report(process.stdout); });
+}
+
+function usage()
+{
+	console.error('usage: %s [-n]', arg0);
+	console.error('    -n: do not try to resolve user uuids to logins');
+	process.exit(2);
+}
+
+function fail()
+{
+	var args, msg;
+
+	if (arguments.length > 0) {
+		args = Array.prototype.slice.call(arguments);
+		msg = mod_util.format.apply(null, args);
+		console.error('%s: %s', arg0, msg);
+	} else {
+		console.error('%s: fatal error', arg0);
+	}
+
+	process.exit(1);
+}
+
+/*
+ * Helper function for resolving a user uuid to a login name.  This invokes the
+ * "sdc-ldap" command.  You can skip this by specifying "-n".
+ */
+function resolveUser(uuid, callback)
+{
+	mod_assert.equal(typeof (uuid), 'string');
+	mod_assert.ok(/^[a-zA-Z0-9-]/.test(uuid));
+
+	if (!resolve_users) {
+		setImmediate(callback, null, null);
+		return;
+	}
+
+	console.error('resolving user "%s"', uuid);
+	mod_child.exec('sdc-ldap search uuid=' + uuid,
+	    function (error, stdout, stderr) {
+		var msg, lines, logins;
+
+		if (error) {
+			msg = 'sdc-ldap command ';
+			if (error.signal) {
+				msg += 'terminated by signal ' +
+				    error.signal;
+			} else {
+				msg += 'exited with code ' + error.code;
+			}
+
+			msg += '(stdout = "' + stdout + '", stderr = "' +
+			    stderr + '")';
+			callback(new Error(msg));
+			return;
+		}
+
+		logins = [];
+		lines = stdout.split(/\n/);
+		lines.forEach(function (line) {
+			/*
+			 * We could use split, but that would break if logins
+			 * have colons.  node-strsplit would help here.
+			 */
+			var c;
+
+			c = line.indexOf(':');
+			if (line.substr(0, c) != 'login')
+				return;
+			logins.push(line.substr(c + 2));
+		});
+
+		if (logins.length === 0)
+			callback(null, null);
+		else if (logins.length == 1)
+			callback(null, logins[0]);
+		else
+			callback(new Error('unexpectedly found ' +
+			    logins.length + ' logins'));
+	    });
+}
+
+/*
+ * Pad "str.toString()" to a width of "count" characters by prepending instances
+ * of "padchar" as needed.
+ */
+function pad(str, padchar, count)
+{
+	var x;
+
+	mod_assert.ok(padchar.length > 0);
+
+	x = str.toString();
+	while (x.length < count)
+		x = padchar + x;
+
+	return (x);
+}
+
+/*
+ * Given a percentage, format it for display, similar to the printf-style format
+ * string "%.1f%%".  If "pct" is null, just returns "-".
+ */
+function fmtPercent(pct)
+{
+	return (pct === null ? '-' : (pct.toFixed(1) + '%'));
+}
+
+/*
+ * The DataReader is a transform stream that just sucks in all the data, parses
+ * it, and stores aggregated results.  The report() method is used to dump the
+ * report to stdout.
+ */
+function DataReader(options)
+{
+	mod_stream.Transform.call(this, options);
+
+	this.dr_data = '';		/* raw input as UTF8 string */
+	this.dr_byuser = {};		/* mbyte count per user */
+	this.dr_userdet = [];		/* info about top users, sorted */
+	this.dr_bycn = {};		/* per-CN, per-category counts */
+	this.dr_totalusermb = 0;	/* total MB accounted-for by users */
+	this.dr_logins = {};		/* map of user uuids to logins */
+}
+
+mod_util.inherits(DataReader, mod_stream.Transform);
+
+DataReader.prototype._transform = function (chunk, encoding, callback)
+{
+	/*
+	 * We could (and should) turn this into a streaming interface by
+	 * throwing an "lstream" in front of this, but for now we're trying to
+	 * keep this tool to a single file with no dependencies, so it's easiest
+	 * to just read all the data and parse it later.
+	 */
+	this.dr_data += chunk.toString('utf8');
+	setImmediate(callback);
+};
+
+DataReader.prototype._flush = function (callback)
+{
+	var self = this;
+	var lines;
+
+	/*
+	 * We don't really emit anything, so just indicate to Node that we're
+	 * done emitting data.
+	 */
+	this.push(null);
+
+	/*
+	 * Split the input into lines, parse each line, and store the aggregated
+	 * data.
+	 */
+	lines = this.dr_data.split(/\n/);
+	lines.forEach(function (line, i) {
+		var parts, count, cnlabel;
+
+		if (line.length === 0)
+			return;
+
+		parts = line.split(/\s+/);
+		if (parts.length != 5) {
+			console.error('warn: line %d: garbled (ignored): "%s"',
+			    i + 1, line);
+			return;
+		}
+
+		count = parseInt(parts[4], 10);
+		if (isNaN(count)) {
+			console.error('warn: line %d: bad count (ignored): ' +
+			    '"%s"', i + 1, line);
+			return;
+		}
+
+		if (parts[3] != '-') {
+			/* User-specific usage information. */
+			if (!self.dr_byuser.hasOwnProperty(parts[3]))
+				self.dr_byuser[parts[3]] = 0;
+			self.dr_byuser[parts[3]] += count;
+			self.dr_totalusermb += count;
+		} else {
+			/* Global CN usage information. */
+			cnlabel = mod_util.format('%s %s', parts[0], parts[1]);
+			if (!self.dr_bycn.hasOwnProperty(cnlabel))
+				self.dr_bycn[cnlabel] = {};
+			if (self.dr_bycn[cnlabel].hasOwnProperty(parts[2]))
+				console.error('warn: line %d: duplicate CN ' +
+				    'info (taking new value): "%s"', i + 1,
+				    line);
+			self.dr_bycn[cnlabel][parts[2]] = count;
+		}
+	});
+
+	/*
+	 * Now that we've parsed the input, process the per-user data so we can
+	 * figure out which users we want to fetch details for.
+	 */
+	this.formatUserDetails();
+
+	this.resolveUsers(function () {
+		callback();
+		self.emit('ready');
+	});
+};
+
+/*
+ * Process the per-user data: count up percentages, sort by space used, and
+ * filter only top users.  This populates dr_userdet with detailed records for
+ * top users.
+ */
+DataReader.prototype.formatUserDetails = function ()
+{
+	var self = this;
+	var limit = max_users_to_print;
+	var uuids;
+
+	uuids = Object.keys(this.dr_byuser);
+	uuids = uuids.filter(function (uuid) {
+		return (self.dr_byuser[uuid] > 0);
+	});
+	uuids.sort(function (a, b) {
+		return (self.dr_byuser[b] - self.dr_byuser[a]);
+	});
+
+	uuids.forEach(function (uuid, i) {
+		var pctraw;
+		var info = {};
+
+		info.uuid = uuid;
+
+		if (self.dr_totalusermb === 0) {
+			info.pctraw = null;
+			info.pctcum = null;
+		} else {
+			pctraw = 100 * self.dr_byuser[uuid] /
+			    self.dr_totalusermb;
+			info.pctraw = pctraw;
+			info.pctcum = pctraw +
+			    (i === 0 ? 0 : self.dr_userdet[i - 1].pctcum);
+		}
+
+		info.gbytes = (Math.round(
+		    10 * self.dr_byuser[uuid] / 1024) / 10).toFixed(1);
+		self.dr_userdet.push(info);
+	});
+
+	/*
+	 * This is pretty simplistic for now, but we could easily have it be
+	 * based on the cumulative percentage of space accounted-for (i.e., dump
+	 * users responsible for 80% of space usage).
+	 */
+	self.dr_userdet = self.dr_userdet.slice(0, limit);
+};
+
+/*
+ * Resolve the user uuids to logins for the top users.
+ */
+DataReader.prototype.resolveUsers = function (callback)
+{
+	/*
+	 * We could manage concurrency better with node-vasync, but we're
+	 * limited by the aforementioned dependency constraints.  We opt for
+	 * serial over parallel to minimize load on the LDAP server.
+	 */
+	var uuids, which;
+	var self = this;
+
+	function next() {
+		if (++which == uuids.length) {
+			callback();
+			return;
+		}
+
+		if (specialUuids.hasOwnProperty(uuids[which])) {
+			next();
+			return;
+		}
+
+		resolveUser(uuids[which], function (err, login) {
+			if (err) {
+				console.error('warn: resolve "%s": %s',
+				    uuids[which], err.message);
+			} else if (login !== null) {
+				self.dr_logins[uuids[which]] = login;
+			}
+
+			next();
+		});
+	}
+
+	which = -1;
+	uuids = this.dr_userdet.map(function (info) { return (info.uuid); });
+	setImmediate(next);
+};
+
+/*
+ * Dump to stdout a text report of usage information of top users (by user) and
+ * all CNs.
+ */
+DataReader.prototype.report = function (stdout)
+{
+	this.reportByUser(stdout);
+	this.reportByCn(stdout);
+};
+
+DataReader.prototype.reportByUser = function (stdout)
+{
+	var self = this;
+
+	stdout.write('Per-user physical storage used (top users)\n\n');
+	stdout.write('    GIGABYTES   %TOT    %CUM  USER\n');
+
+	this.dr_userdet.forEach(function (info) {
+		var user;
+
+		if (specialUuids.hasOwnProperty(info.uuid)) {
+			user = info.uuid;
+		} else if (self.dr_logins.hasOwnProperty(info.uuid)) {
+			user = 'login: ' + self.dr_logins[info.uuid];
+		} else {
+			user = 'uuid:  ' + info.uuid;
+		}
+
+		stdout.write('    ' + pad(info.gbytes, ' ', 9) +
+		    '  ' + pad(fmtPercent(info.pctraw), ' ', 5) +
+		    '  ' + pad(fmtPercent(info.pctcum), ' ', 6) +
+		    '  ' + user + '\n');
+	});
+
+	stdout.write('\n');
+};
+
+DataReader.prototype.reportByCn = function (stdout)
+{
+	var self = this;
+	var labels;
+
+	stdout.write('Per-CN physical storage used\n\n');
+	stdout.write('    GBUSED  GBTOTAL  %USED  %CRASH  %MANTA  ' +
+	    '%REST  CN\n');
+
+	labels = Object.keys(this.dr_bycn).sort();
+	labels.forEach(function (cnlabel) {
+		var d, rawused, used, total, pct;
+		var usedbymanta, usedbycrash, usedrest;
+		var key;
+
+		d = self.dr_bycn[cnlabel];
+		rawused = d['zones:used'];
+		used = Math.round(rawused / 1024 / 1024 / 1024);
+		total = Math.round((rawused + d['zones:avail']) /
+		    1024 / 1024 / 1024);
+		pct = 100 * used / total;
+
+		usedbymanta = 0;
+		usedbycrash = d['/var/crash'] * 1024 * 1024;
+		for (key in d) {
+			if (!d.hasOwnProperty(key))
+				continue;
+
+			if (key.substr(0, 'zones/'.length) != 'zones/')
+				continue;
+
+			usedbymanta += d[key];
+		}
+
+		usedbymanta = 100 * usedbymanta / rawused;
+		usedbycrash = 100 * usedbycrash / rawused;
+		usedrest = 100 - (usedbymanta + usedbycrash);
+
+		stdout.write('    ' + pad(used, ' ', 6) +
+		    '  ' + pad(total, ' ', 7) +
+		    '  ' + pad(fmtPercent(pct), ' ', 5) +
+		    '  ' + pad(fmtPercent(usedbycrash), ' ', 6) +
+		    '  ' + pad(fmtPercent(usedbymanta), ' ', 6) +
+		    '  ' + pad(fmtPercent(usedrest), ' ', 5) +
+		    '  ' + cnlabel + '\n');
+	});
+};
+
+main();

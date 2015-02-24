@@ -1,0 +1,133 @@
+#!/bin/bash
+#
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+#
+
+#
+# Copyright (c) 2015, Joyent, Inc.
+#
+
+#
+# manta-cn-physusage: generate a report of physical usage for a Manta CN.
+# Run this from the global zone of a Manta storage node.  The report includes
+# information on a per-storage-zone and per-user basis.  For production
+# deployments, there's one storage zone per CN.  For lab deployments, there may
+# be multiple.
+#
+
+set -o pipefail
+
+mcp_arg0="$(basename ${BASH_SOURCE[0]})"
+mcp_label="$(sysinfo | json -ga 'Datacenter Name' 'Hostname')"
+mcp_storzones=
+
+function main
+{
+	[[ $# -eq 0 ]] || usage
+	[[ $(zonename) == "global" ]] || fail "must be run from global zone"
+
+	mcp_storzones=$(list_storzones) || fail "failed to list storage zones"
+	if [[ -z "$mcp_storzones" ]]; then
+		fail "no storage zones found"
+	fi
+
+	echo "found storage zones: $mcp_storzones" >&2
+	report_cn
+	for zone in $mcp_storzones; do
+		report_zone "$zone"
+	done
+}
+
+function usage
+{
+	echo "usage: $mcp_arg0" >&2
+	exit 2
+}
+
+function fail
+{
+	echo "$mcp_arg0: $@" >&2
+	exit 1
+}
+
+#
+# List Manta storage zones on this CN.
+#
+function list_storzones
+{
+	vmadm lookup tags.manta_role=storage | tr '\n' ' '
+}
+
+#
+# Generate on stdout a report of CN-global storage usage.  This does not
+# include space attributed to the storage zones on the CN.
+#
+function report_cn
+{
+	local zones varcrash
+	
+	zones="$(zfs list -H -p -o used,avail zones)" || \
+	    fail "failed to fetch total pool usage"
+	varcrash="$(du -ms /var/crash)" || \
+	    fail "failed to fetch /var/crash usage"
+
+	set -- $zones
+	report_storage zones:used "-" "$1"
+	report_storage zones:avail "-" "$2"
+
+	set -- $varcrash
+	report_storage /var/crash "-" "$1"
+}
+
+#
+# For a given storage zone on this CN, report space used by that zone and space
+# used on a per-user basis.
+#
+function report_zone
+{
+	local storzone zfs uuid
+
+	storzone="$1"
+	zfs="$(zfs list -H -p -o used "zones/$storzone")" || \
+	    fail "failed to fetch zfs usage of \"zones/$storzone\""
+	report_storage "zones/$storzone" "-" "$zfs"
+
+	du -ms /zones/$storzone/root/manta/* | while read mbytes path; do
+		uuid="$(basename "$path")"
+		report_storage "zones/$storzone" "$uuid" "$mbytes"
+	done
+}
+
+#
+# report_storage CATEGORY USER SIZE: emit a record describing physical storage
+# used.
+#
+#     CATEGORY	This is a category that should be meaningful within the context
+#     		of this CN.  Note that the unit varies depending on the
+#     		category.  Today, we use categories:
+#
+#     		    zones:used    total physical bytes used in the whole pool
+#     		    zones:avail   total physical bytes available in the pool
+#     		    /var/crash    physical MB used under /var/crash
+#     		    zones/$zone	  physical storage used by zone "$zone"
+#     		    		  When USER is "-", the value is in bytes.  When
+#     		    		  USER is anything else, the value is in
+#     		    		  megabytes.
+#
+#	USER	UUID for the user to which the space is accounted
+#
+#    	SIZE	Count of bytes or megabytes (see category)
+#
+# For now, the output format is one line per record containing exactly this
+# information.  We prepend columns identifying this CN so that we can merge this
+# with data from other CNs into a single file.
+#
+function report_storage
+{
+	[[ $# -eq 3 ]] || fail "internal error: bad args to report_storage"
+	echo "$mcp_label $1 $2 $3"
+}
+
+main
