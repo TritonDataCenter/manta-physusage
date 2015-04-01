@@ -37,9 +37,10 @@ Now on the headnode:
     # ./deploy-and-run.sh 
     ...
 
-This creates an output file in that directory with the uuid of my server:
+This creates an output file in a date-based subdirectory with the uuid of my
+server:
 
-    # head 44454c4c-5700-1047-8051-b3c04f585131 
+    # head 2015-04-01/44454c4c-5700-1047-8051-b3c04f585131 
     emy-10 headnode zones:used - 242915668480
     emy-10 headnode zones:avail - 1487956160000
     emy-10 headnode /var/crash - 0
