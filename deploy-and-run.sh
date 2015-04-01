@@ -20,10 +20,15 @@ set -o errexit
 set -o pipefail
 
 hosts="$(manta-adm cn -n storage)"
+datepart="$(date +%Y-%m-%d)"
+dcname="$(sysinfo | json 'Datacenter Name')"
 
+mkdir -p "/var/tmp/manta-physusage/$datepart"
 sdc-oneachnode -n "$hosts" 'rm -f /var/tmp/manta-cn-physusage'
 sdc-oneachnode -n "$hosts" -d /var/tmp -g /var/tmp/manta-physusage/manta-cn-physusage
-sdc-oneachnode -T 1200 -n "$hosts" 'chmod +x /var/tmp/manta-cn-physusage &&
+sdc-oneachnode -T 2400 -n "$hosts" 'chmod +x /var/tmp/manta-cn-physusage &&
     /var/tmp/manta-cn-physusage > /var/tmp/manta-physusage-latest.txt'
-sdc-oneachnode -n "$hosts" -d /var/tmp/manta-physusage \
+sdc-oneachnode -n "$hosts" -d /var/tmp/manta-physusage/$datepart \
     -p /var/tmp/manta-physusage-latest.txt
+cat /var/tmp/manta-physusage/$datepart/* > \
+    /var/tmp/manta-physusage/$datepart/$dcname.txt
