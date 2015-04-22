@@ -67,7 +67,7 @@ function list_storzones
 function report_cn
 {
 	local zones varcrash
-	
+
 	zones="$(zfs list -H -p -o used,avail zones)" || \
 	    fail "failed to fetch total pool usage"
 	varcrash="$(du -ms /var/crash)" || \
@@ -90,9 +90,12 @@ function report_zone
 	local storzone zfs uuid
 
 	storzone="$1"
-	zfs="$(zfs list -H -p -o used "zones/$storzone")" || \
-	    fail "failed to fetch zfs usage of \"zones/$storzone\""
-	report_storage "zones/$storzone" "-" "$zfs"
+	zfs="$(zfs list -H -p -o used,usedbysnapshots \
+	    "zones/$storzone/data")" || \
+	    fail "failed to fetch zfs usage of \"zones/$storzone/data\""
+	set -- $zfs
+	report_storage "zones/$storzone" "-" "$1"
+	report_storage "zones/$storzone" "snapshots" "$2"
 
 	du -ms /zones/$storzone/root/manta/* | while read mbytes path; do
 		uuid="$(basename "$path")"
@@ -112,9 +115,9 @@ function report_zone
 #     		    zones:avail   total physical bytes available in the pool
 #     		    /var/crash    physical MB used under /var/crash
 #     		    zones/$zone	  physical storage used by zone "$zone"
-#     		    		  When USER is "-", the value is in bytes.  When
-#     		    		  USER is anything else, the value is in
-#     		    		  megabytes.
+#     		    		  When USER is "-" or "snapshots", the value is
+#     		    		  in bytes.  When USER is anything else, the
+#     		    		  value is in megabytes.
 #
 #	USER	UUID for the user to which the space is accounted
 #

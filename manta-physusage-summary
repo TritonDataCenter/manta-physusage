@@ -43,6 +43,7 @@ var arg0 = mod_path.basename(process.argv[1]);
 var specialUuids = {
     'nginx_temp': true,
     'rebalance_tmp': true,
+    'snapshots': true,
     'tombstone': true
 };
 
@@ -219,7 +220,7 @@ DataReader.prototype._flush = function (callback)
 	 */
 	lines = this.dr_data.split(/\n/);
 	lines.forEach(function (line, i) {
-		var parts, count, cnlabel;
+		var parts, count, cnlabel, cncategory;
 
 		if (line.length === 0)
 			return;
@@ -238,7 +239,7 @@ DataReader.prototype._flush = function (callback)
 			return;
 		}
 
-		if (parts[3] != '-') {
+		if (parts[3] != '-' && parts[3] != 'snapshots') {
 			/* User-specific usage information. */
 			if (!self.dr_byuser.hasOwnProperty(parts[3]))
 				self.dr_byuser[parts[3]] = 0;
@@ -249,11 +250,13 @@ DataReader.prototype._flush = function (callback)
 			cnlabel = mod_util.format('%s %s', parts[0], parts[1]);
 			if (!self.dr_bycn.hasOwnProperty(cnlabel))
 				self.dr_bycn[cnlabel] = {};
-			if (self.dr_bycn[cnlabel].hasOwnProperty(parts[2]))
+			cncategory = parts[3] == 'snapshots' ?
+			    'snapshots' : parts[2];
+			if (self.dr_bycn[cnlabel].hasOwnProperty(cncategory))
 				console.error('warn: line %d: duplicate CN ' +
 				    'info (taking new value): "%s"', i + 1,
 				    line);
-			self.dr_bycn[cnlabel][parts[2]] = count;
+			self.dr_bycn[cnlabel][cncategory] = count;
 		}
 	});
 
@@ -402,13 +405,13 @@ DataReader.prototype.reportByCn = function (stdout)
 	var labels;
 
 	stdout.write('Per-CN physical storage used\n\n');
-	stdout.write('    GBUSED  GBTOTAL  %USED  %CRASH  %MANTA  ' +
+	stdout.write('   GBTOTAL   GBUSED  %USED  %MANTA  %SNAPS  %CRASH  ' +
 	    '%REST  CN\n');
 
 	labels = Object.keys(this.dr_bycn).sort();
 	labels.forEach(function (cnlabel) {
 		var d, rawused, used, total, pct;
-		var usedbymanta, usedbycrash, usedrest;
+		var usedbymanta, usedbysnaps, usedbycrash, usedrest;
 		var key;
 
 		d = self.dr_bycn[cnlabel];
@@ -432,16 +435,43 @@ DataReader.prototype.reportByCn = function (stdout)
 
 		usedbymanta = 100 * usedbymanta / rawused;
 		usedbycrash = 100 * usedbycrash / rawused;
-		usedrest = 100 - (usedbymanta + usedbycrash);
 
-		stdout.write('    ' + pad(used, ' ', 6) +
-		    '  ' + pad(total, ' ', 7) +
+		if (d.hasOwnProperty('snapshots')) {
+			usedbysnaps = d['snapshots'];
+			usedbysnaps = 100 * usedbysnaps / rawused;
+			/* "manta" includes "snaps", so don't subtract both. */
+			usedrest = 100 - (usedbymanta + usedbycrash);
+			/* But report Manta usage without the snapshots. */
+			usedbymanta -= usedbysnaps;
+
+			usedbysnaps = fmtPercent(usedbysnaps);
+		} else {
+			usedbysnaps = '?';
+			usedrest = 100 - (usedbymanta + usedbycrash);
+		}
+
+		stdout.write(
+		    '    ' + pad(total, ' ', 6) +
+		    '  ' + pad(used, ' ', 7) +
 		    '  ' + pad(fmtPercent(pct), ' ', 5) +
-		    '  ' + pad(fmtPercent(usedbycrash), ' ', 6) +
 		    '  ' + pad(fmtPercent(usedbymanta), ' ', 6) +
+		    '  ' + pad(usedbysnaps, ' ', 6) +
+		    '  ' + pad(fmtPercent(usedbycrash), ' ', 6) +
 		    '  ' + pad(fmtPercent(usedrest), ' ', 5) +
 		    '  ' + cnlabel + '\n');
 	});
+
+	stdout.write([
+	'',
+	'    GBTOTAL: total gigabytes of usable space on this system',
+	'    GBUSED:  total gigabytes of usable space that is currently used',
+	'    %USED:   percentage of usable space that is currently used',
+	'    %MANTA:  percentage of USED space associated with Manta data',
+	'    %SNAPS:  percentage of USED space referenced only by snapshots',
+	'    %CRASH:  percentage of USED space associated with crash dumps',
+	'    %REST:   percentage of USED space unaccounted-for in other fields',
+	''
+	].join('\n'));
 };
 
 main();
