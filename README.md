@@ -65,8 +65,16 @@ Now we feed that to the summarizer.  Note that you must have a copy of Node
     
     Per-CN physical storage used
     
-        GBUSED  GBTOTAL  %USED  %CRASH  %MANTA  %REST  CN
-           226     1612  14.0%    0.0%    6.4%  93.6%  emy-10 headnode
+       GBTOTAL   GBUSED  %USED  %MANTA  %SNAPS  %CRASH  %REST  CN
+          1612      226  14.0%    6.4%    0.0%    0.0%  93.6%  emy-10 headnode
+
+        GBTOTAL: total gigabytes of usable space on this system
+        GBUSED:  total gigabytes of usable space that is currently used
+        %USED:   percentage of usable space that is currently used
+        %MANTA:  percentage of USED space associated with Manta data
+        %SNAPS:  percentage of USED space referenced only by snapshots
+        %CRASH:  percentage of USED space associated with crash dumps
+        %REST:   percentage of USED space unaccounted-for in other fields
 
 ## Reports
 
@@ -87,11 +95,4 @@ Fields in the per-user report:
   filesystem -- see [Manta GC
   overview](https://github.com/joyent/manta-mola/blob/master/docs/gc-overview.md)).
 
-Fields in the per-CN report:
-
-* **GBUSED**: gigabytes of space used on this CN
-* **GBTOTAL**: total gigabytes of space on this CN
-* **%USED**: percent of total space that's used on this CN
-* **%CRASH**: percent of used space associated with crash dumps
-* **%MANTA**: percent of used space associated with Manta user data
-* **%REST**: percent of used space associated with everything else
+Fields in the per-CN report are described above.
