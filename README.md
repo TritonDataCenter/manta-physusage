@@ -12,13 +12,18 @@ The basic flow is:
 
 1. Install the scripts in this directory onto an
    [SDC](https://github.com/joyent/sdc) headnode.  These examples use the path
-   /var/tmp/manta-physusage on the headnode.
+   /var/tmp/manta-physusage on the headnode, and the scripts depend on that.
 2. On the headnode, run the `./deploy-and-run.sh` script.  This copies the per-CN
    script over to each Manta storage CN, runs it, and fetches the results into
-   the current directory.  It can take several minutes to run this script on
-   large deployments.
-3. cat all the output files together and feed them to
-   `./manta-physusage-summary'
+   the current directory.
+3. Separately run a summary job on the daily mako dumps already in Manta:
+
+       ./manta-summarize-makos
+
+   This job can take a few minutes on large deployments.
+
+4. Concatenate the output files from the above job with the output files
+   on each headnode and feed them to `manta-physusage-summary`.
 
 Here's an example using a test datacenter called "emy10" that has just one Manta
 storage CN (the headnode itself).  First, copy the files to the headnode:
@@ -48,10 +53,21 @@ server:
     emy-10 headnode zones/6ee79dfd-5a88-4ec2-928e-54881959957c 27b71bfe-ccf6-e287-9ffe-9b8dd3a40416 21
     ...
 
-Now we feed that to the summarizer.  Note that you must have a copy of Node
-0.10 or later on your PATH:
+We'll also want to run the summarize job, from a place that has the node-manta
+tools installed:
 
-    # node manta-physusage-summary < 44454c4c-5700-1047-8051-b3c04f585131 
+    $ ./manta-summarize-makos 
+    79bf4dc1-2145-e731-8598-ca0ef4aa8516
+    added 3 inputs to 79bf4dc1-2145-e731-8598-ca0ef4aa8516
+
+    $ mjob outputs 79bf4dc1-2145-e731-8598-ca0ef4aa8516 | \
+        xargs -n1 mget -O
+
+Now we feed _all of that_ to the summarizer.  Note that you must have a copy of
+Node 0.10 or later on your PATH:
+
+    # cat 44454c4c-5700-1047-8051-b3c04f585131 *.stor.emy-10.* | \
+        node manta-physusage-summary < 44454c4c-5700-1047-8051-b3c04f585131 
     resolving user "365fe66c-9d56-e167-e1d8-f9459d7019c5"
     resolving user "9240bb94-63ca-410b-a394-f38604398aaf"
     resolving user "27b71bfe-ccf6-e287-9ffe-9b8dd3a40416"

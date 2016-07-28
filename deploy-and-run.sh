@@ -26,7 +26,7 @@ dcname="$(sysinfo | json 'Datacenter Name')"
 mkdir -p "/var/tmp/manta-physusage/$datepart"
 sdc-oneachnode -n "$hosts" 'rm -f /var/tmp/manta-cn-physusage'
 sdc-oneachnode -n "$hosts" -d /var/tmp -g /var/tmp/manta-physusage/manta-cn-physusage
-sdc-oneachnode -T 2400 -n "$hosts" 'chmod +x /var/tmp/manta-cn-physusage &&
+sdc-oneachnode -I -T 2400 -n "$hosts" 'chmod +x /var/tmp/manta-cn-physusage &&
     /var/tmp/manta-cn-physusage > /var/tmp/manta-physusage-latest.txt'
 sdc-oneachnode -n "$hosts" -d /var/tmp/manta-physusage/$datepart \
     -p /var/tmp/manta-physusage-latest.txt

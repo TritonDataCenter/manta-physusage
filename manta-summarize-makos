@@ -1,0 +1,69 @@
+#!/bin/bash
+#
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+#
+
+#
+# Copyright (c) 2016, Joyent, Inc.
+#
+
+#
+# manta-summarize-makos: run a Manta job against the daily mako dumps, producing
+# output from each one suitable for input to manta-physusage-summary.
+#
+
+set -o pipefail
+set -o errexit
+
+msm_mako_dir=/poseidon/stor/mako
+msm_dump_objects=
+msm_script=
+
+function main
+{
+	if [[ $# != 0 ]]; then
+		usage
+	fi
+
+	msm_dump_objects="$(mfind -t o "$msm_mako_dir")" ||
+	    fail "failed to list dump objects"
+	msm_script="$(mkscript)"
+	[[ -n "$msm_dump_objects" ]] || fail "no dump objects found"
+	mjob create --name="manta-summarize-makos" \
+	    -w --map "$msm_script" <<< "$msm_dump_objects"
+}
+
+function usage
+{
+	cat >&2 <<-EOF
+	usage: manta-summarize-makos
+
+	From the daily mako dumps in Manta, generate a summary suitable for
+	input to manta-physusage-summary.
+	EOF
+
+	exit 2
+}
+
+function fail
+{
+	echo "manta-summarize-makos: $@" >&2
+	exit 1
+}
+
+function mkscript
+{
+	cat <<-'EOF'
+	stor_id="$(basename "$MANTA_INPUT_OBJECT")"
+	awk '{ split($1, x, "/"); bydir[x[3]] += $4 }
+	    END {
+	    	for (dir in bydir) {
+	    		printf("no_dc no_server '$stor_id' %s %d\n", dir, bydir[dir] / 1024);
+		}
+	    }' "$MANTA_INPUT_FILE"
+	EOF
+}
+
+main "$@"
